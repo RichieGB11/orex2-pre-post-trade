@@ -100,6 +100,18 @@ class TradeMetrics:
     notes: str = ""
 
 
+@dataclass
+class LatestMarketSnapshot:
+    """Current market snapshot derived from latest available ORATS trade date."""
+
+    latest_trade_date: Optional[date]
+    iv_rv_spread: Optional[float]
+    iv_rv_spread_trend_coeff: Optional[float]
+    contango: Optional[float]
+    slope_pctile_1y: Optional[float]
+    iv_pctile_1y: Optional[float]
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Analyze sampled backtest trades against ORATS historical core metrics.",
@@ -660,6 +672,48 @@ def analyze_trades(
     return analyzed
 
 
+def compute_latest_market_snapshot(
+    series_by_ticker: Dict[str, TickerSeries],
+) -> LatestMarketSnapshot:
+    latest_series: Optional[TickerSeries] = None
+    latest_date: Optional[date] = None
+
+    for series in series_by_ticker.values():
+        if not series.snapshots:
+            continue
+        series_latest_date = series.snapshots[-1].trade_date
+        if latest_date is None or series_latest_date > latest_date:
+            latest_date = series_latest_date
+            latest_series = series
+
+    if latest_series is None or latest_date is None:
+        return LatestMarketSnapshot(
+            latest_trade_date=None,
+            iv_rv_spread=None,
+            iv_rv_spread_trend_coeff=None,
+            contango=None,
+            slope_pctile_1y=None,
+            iv_pctile_1y=None,
+        )
+
+    latest_idx = len(latest_series.snapshots) - 1
+    latest_snapshot = latest_series.snapshots[latest_idx]
+
+    pre_start = max(0, latest_idx - 10)
+    pre_window = latest_series.snapshots[pre_start:latest_idx]
+    pre_spreads = [s.iv_rv_spread for s in pre_window if s.iv_rv_spread is not None]
+    trend_coeff = linear_regression_slope(pre_spreads)
+
+    return LatestMarketSnapshot(
+        latest_trade_date=latest_snapshot.trade_date,
+        iv_rv_spread=latest_snapshot.iv_rv_spread,
+        iv_rv_spread_trend_coeff=trend_coeff,
+        contango=latest_snapshot.contango,
+        slope_pctile_1y=latest_snapshot.slope_pctile_1y,
+        iv_pctile_1y=latest_snapshot.iv_pctile_1y,
+    )
+
+
 def segment_trades(
     metrics: Sequence[TradeMetrics],
 ) -> Tuple[List[TradeMetrics], List[TradeMetrics], List[TradeMetrics]]:
@@ -730,19 +784,32 @@ def render_table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> st
 def build_summary_comparison_rows(
     winners: Sequence[TradeMetrics],
     losers: Sequence[TradeMetrics],
+    latest_snapshot: LatestMarketSnapshot,
 ) -> List[List[str]]:
     metric_specs = [
-        ("IV-RV Spread at Entry", "iv_rv_spread_at_entry"),
-        ("IV-RV Spread Trend Coefficient", "iv_rv_spread_trend_coeff"),
-        ("Contango at Entry", "contango_at_entry"),
-        ("Slope Percentile at Entry", "slope_pctile_at_entry"),
-        ("IV Percentile at Entry", "iv_pctile1y_at_entry"),
-        ("IV-RV Spread Change (10d post)", "spread_change_post_entry"),
-        ("Contango Change (10d post)", "contango_change_post_entry"),
+        ("IV-RV Spread at Entry", "iv_rv_spread_at_entry", latest_snapshot.iv_rv_spread),
+        (
+            "IV-RV Spread Trend Coefficient",
+            "iv_rv_spread_trend_coeff",
+            latest_snapshot.iv_rv_spread_trend_coeff,
+        ),
+        ("Contango at Entry", "contango_at_entry", latest_snapshot.contango),
+        (
+            "Slope Percentile at Entry",
+            "slope_pctile_at_entry",
+            latest_snapshot.slope_pctile_1y,
+        ),
+        (
+            "IV Percentile at Entry",
+            "iv_pctile1y_at_entry",
+            latest_snapshot.iv_pctile_1y,
+        ),
+        ("IV-RV Spread Change (10d post)", "spread_change_post_entry", None),
+        ("Contango Change (10d post)", "contango_change_post_entry", None),
     ]
 
     rows: List[List[str]] = []
-    for label, field_name in metric_specs:
+    for label, field_name, latest_value in metric_specs:
         winner_avg, _ = mean_or_none([getattr(m, field_name) for m in winners])
         loser_avg, _ = mean_or_none([getattr(m, field_name) for m in losers])
         diff = winner_avg - loser_avg if winner_avg is not None and loser_avg is not None else None
@@ -752,6 +819,7 @@ def build_summary_comparison_rows(
                 format_number(winner_avg),
                 format_number(loser_avg),
                 format_number(diff),
+                format_number(latest_value),
             ]
         )
     return rows
@@ -781,9 +849,19 @@ def print_report(
     winners: Sequence[TradeMetrics],
     middle: Sequence[TradeMetrics],
     losers: Sequence[TradeMetrics],
+    latest_snapshot: LatestMarketSnapshot,
 ) -> None:
-    summary_rows = build_summary_comparison_rows(winners, losers)
+    summary_rows = build_summary_comparison_rows(
+        winners,
+        losers,
+        latest_snapshot,
+    )
     trend_rows = build_trend_distribution_rows(winners, losers)
+    latest_header = (
+        latest_snapshot.latest_trade_date.isoformat()
+        if latest_snapshot.latest_trade_date is not None
+        else "Latest"
+    )
 
     insufficient_pre = sum(1 for m in sampled if m.insufficient_pre_entry)
     early_exit = sum(1 for m in sampled if m.early_exit_used)
@@ -812,7 +890,13 @@ def print_report(
     print("\nSummary Comparison Table")
     print(
         render_table(
-            headers=["Metric", "Winners Avg", "Losers Avg", "Difference"],
+            headers=[
+                "Metric",
+                "Winners Avg",
+                "Losers Avg",
+                "Difference",
+                latest_header,
+            ],
             rows=summary_rows,
         )
     )
@@ -863,6 +947,7 @@ def run(args: argparse.Namespace) -> int:
 
     unique_tickers = sorted({t.ticker for t in sampled_trades})
     series_by_ticker, api_call_count = fetch_hist_core_series(unique_tickers, debug=args.debug)
+    latest_snapshot = compute_latest_market_snapshot(series_by_ticker)
 
     metrics = analyze_trades(
         sampled_trades=sampled_trades,
@@ -881,6 +966,7 @@ def run(args: argparse.Namespace) -> int:
         winners=winners,
         middle=middle,
         losers=losers,
+        latest_snapshot=latest_snapshot,
     )
 
     if args.export_csv:

@@ -101,6 +101,7 @@ Program prints:
 1. Run metadata (file, sample size, seed mode, ticker count, API call count)
 2. Edge-case/data-quality summary
 3. **Summary Comparison Table**
+   - Columns: `Metric | Winners Avg | Losers Avg | Difference | <latest ORATS tradeDate>`
    - IV-RV Spread at Entry
    - IV-RV Spread Trend Coefficient
    - Contango at Entry
@@ -108,6 +109,8 @@ Program prints:
    - IV Percentile at Entry
    - IV-RV Spread Change (10d post)
    - Contango Change (10d post)
+   - The rightmost column is a current market snapshot from the latest ORATS date.
+     - For post-entry change rows, this snapshot column is intentionally `N/A`.
 4. **Trend Distribution Table**
    - Rising / Flat / Falling counts for winners and losers
 
