@@ -1,0 +1,178 @@
+Here are the project specs:
+
+## **Project: Pre/Post Trade Metric Study**
+
+### **Goal**
+
+Analyze the market conditions surrounding backtest trades to identify which metrics distinguish winning trades from losing trades. By studying the 10 trading days before and after each trade entry, we will determine whether specific volatility metrics can predict trade success and potentially improve future entry timing or position sizing decisions.
+
+---
+
+### **Data Source**
+
+**Endpoint:** ORATS Historical Summaries
+```
+GET /datav2/hist/summaries?ticker={ticker}&token={token}
+```
+
+This returns the complete historical time series for the specified ticker. One API call retrieves all trading dates, from which we filter to the relevant windows around each trade. Note, as given in earlier context, you'll be using the orats-client program we've built. It is located in ../orats-client. Ingest all the documentation in ../orats-client/docs for this work.
+
+---
+
+### **Input Requirements**
+
+**Trade Log CSV** with the following columns:
+- `date` (date the trade opens, YYYY-MM-DD)
+- 'ticker' (will be unique, and is the ticker used in the API call)
+- `exitDate` (YYYY-MM-DD)
+- `profit` (dollar or percentage P&L)
+- 'leg' (to group legs into a trade)
+
+The trade log will have all trades in the backtest. The program will be required to perform a random sample of 100 of these trades. Each date (which is the trade open date) will have multiple rows, one for each leg of the trade. For example, you can expect an Iron Condor trade to take up four lines and be marked legs 1-4. For the purpose of this work, we are summing profit across these legs and do not need to report them leg-by-leg.
+
+I would like a folder built in this project where I can store backtests. (Note, 1 backtest = 1 trade log CSV). The program should allow me to select which backtest to run in a friendly UI (for terminal).
+
+---
+
+### **Fields to Extract from Summaries**
+
+Now we are going to capture metrics from the API. I continue to refer to trading date below, but we are referring now to the trading date from the data that we extract from the API (not the trading date from the input file above).
+For each trading date, capture:
+
+| Field | Description |
+|-------|-------------|
+| tradeDate | Date of the record |
+| iv30d | 30-day implied volatility |
+| orHv20d | 20-day realized historical volatility |
+| contango | M2 IV minus M1 IV |
+| slope | Volatility skew slope |
+| slopePctile1y | Slope percentile vs. prior year |
+| ivPct1y | IV percentile vs. prior year |
+
+---
+
+### **Derived Metrics to Calculate**
+
+Be efficient. When we call the API, we will get summary data for all dates. Since we are selecting 100 random trade dates from the Trade Log CSV, and looking at Summaries data for the observation window for each of those, we will certainly have overlap. Maybe it's best to calculate the metric for all dates in the Summaries data, then run the calculation over each of the 100 observation windows. I dunno. You're the coder, you do what's most efficient and effective.
+
+**1. IV-RV Spread**
+```
+ivRvSpread = iv30d - orHv20d
+```
+
+Calculate for each day in the observation window.
+
+**2. IV-RV Spread at Entry**
+
+The ivRvSpread value on the entry_date.
+
+**3. IV-RV Spread Trend (10 days pre-entry)**
+
+Perform linear regression on ivRvSpread for the 10 trading days prior to entry (not including entry date). Use the slope coefficient to classify:
+- **Rising:** slope coefficient > 0.05
+- **Falling:** slope coefficient < -0.05
+- **Flat:** slope coefficient between -0.05 and 0.05
+
+The threshold of 0.05 represents a meaningful daily change in spread. Adjust if initial results show poor distribution across categories.
+
+**4. Contango at Entry**
+
+The contango value on the entry_date.
+
+**5. Slope Percentile at Entry**
+
+The slopePctile1y value on the entry_date.
+
+**6. IV Percentile at Entry**
+
+The ivPct1y value on the entry_date.
+
+**7. IV-RV Spread Change Post-Entry**
+
+```
+spreadChange = ivRvSpread(entry_date + 10 trading days) - ivRvSpread(entry_date)
+```
+
+If exit occurs before 10 days, use exit_date instead.
+
+**8. Contango Change Post-Entry**
+
+```
+contangoChange = contango(entry_date + 10 trading days) - contango(entry_date)
+```
+
+Same logic for early exit.
+
+---
+
+### **Trade Segmentation**
+
+Rank all 100 trades by pnl. Segment into three groups:
+
+| Segment | Definition |
+|---------|------------|
+| Winners | Top 33 trades by pnl |
+| Losers | Bottom 33 trades by pnl |
+| Middle | Remaining 34 trades (exclude from primary analysis) |
+
+---
+
+### **Output Requirements**
+
+
+
+**1. Summary Comparison Table**
+
+| Metric | Winners Avg | Losers Avg | Difference |
+|--------|-------------|------------|------------|
+| IV-RV Spread at Entry | | | |
+| IV-RV Spread Trend Coefficient | | | |
+| Contango at Entry | | | |
+| Slope Percentile at Entry | | | |
+| IV Percentile at Entry | | | |
+| IV-RV Spread Change (10d post) | | | |
+| Contango Change (10d post) | | | |
+
+**2. Trend Distribution Table**
+
+| Spread Trend | Winners Count | Losers Count |
+|--------------|---------------|--------------|
+| Rising | | |
+| Flat | | |
+| Falling | | |
+
+**3. README**
+
+Include the following questions this analysis aims to answer:
+
+1. Did winners have higher IV-RV spread at entry than losers?
+2. Did winners enter when spread was rising, falling, or flat?
+3. Was slope percentile meaningfully different between winners and losers?
+4. Did contango at entry predict anything about outcome?
+5. Is there a combination of metrics that strongly favors winners?
+6. How did IV-RV spread and contango change post-entry for winners vs. losers?
+
+---
+
+### **Edge Cases to Handle**
+
+**Insufficient pre-entry data:** If fewer than 10 trading days exist before entry_date in the dataset, use as many days as available. Flag these trades in the output.
+
+**Early exit:** If exit_date is fewer than 10 trading days after entry_date, use exit_date for post-entry calculations. Note the actual days held in the output.
+
+**Missing data:** If any required field is null for a given date, propagate null to derived metrics and exclude from averages.
+
+**Weekends/holidays:** The Summaries data contains only trading days. Date arithmetic should find the nearest available trading date when calculating windows.
+
+---
+
+### **Parameters**
+
+| Parameter | Value |
+|-----------|-------|
+| Ticker | User-specified |
+| Number of trades | 100 |
+| Pre-entry window | 10 trading days |
+| Post-entry window | 10 trading days (or exit, whichever is sooner) |
+| Trend threshold | 0.05 (slope coefficient) |
+| Winner/Loser segmentation | Top/bottom 33 by pnl |
